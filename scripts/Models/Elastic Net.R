@@ -21,8 +21,15 @@ suppressPackageStartupMessages({
 # ------------------------
 # 2) Load data
 # ------------------------
-train <- read.csv("train.csv", na.strings = c("", "NA", "NaN"))
-test  <- read.csv("test.csv",  na.strings = c("", "NA", "NaN"))
+train <- read.csv(
+  "C:/Users/Sergio/Documents/Problem-Set-3-Making-Money-with-ML/data/data_train_text_finished.csv",
+  na.strings = c("", "NA", "NaN")
+)
+
+test  <- read.csv(
+  "C:/Users/Sergio/Documents/Problem-Set-3-Making-Money-with-ML/data/data_test_text_finished.csv",
+  na.strings = c("", "NA", "NaN")
+)
 
 # Chequeos básicos
 stopifnot("property_id" %in% names(train))
@@ -100,7 +107,7 @@ train_sf <- sf::st_as_sf(
   crs    = 4326
 )
 
-# Crear folds espaciales (bloques) como en las diapositivas
+# Crear folds espaciales (bloques)
 block_folds <- spatialsample::spatial_block_cv(train_sf, v = 5)
 
 # Pasar de rsample a índices para caret
@@ -128,10 +135,9 @@ ctrl_spatial_en <- trainControl(
 # ------------------------
 # 6) Grid de hiperparámetros (alpha, lambda) para Elastic Net
 # ------------------------
-# lambda (penalty) y alpha (mezcla L1/L2) similar a tu script viejo
 tune_grid_en <- expand.grid(
-  alpha  = seq(0.2, 1.0, by = 0.2),                 # 0.2, 0.4, ..., 1.0
-  lambda = seq(0.0005, 0.01, length.out = 10)       # ajusta si quieres
+  alpha  = seq(0.2, 1.0, by = 0.2),            # 0.2, 0.4, ..., 1.0
+  lambda = seq(0.0005, 0.01, length.out = 10)  # ajusta si quieres
 )
 
 # ------------------------
@@ -140,13 +146,13 @@ tune_grid_en <- expand.grid(
 set.seed(2025)
 model_en <- caret::train(
   price ~ .,
-  data      = train_df,
-  method    = "glmnet",
-  trControl = ctrl_spatial_en,
-  tuneGrid  = tune_grid_en,
-  metric    = "MAE",
+  data       = train_df,
+  method     = "glmnet",
+  trControl  = ctrl_spatial_en,
+  tuneGrid   = tune_grid_en,
+  metric     = "MAE",
   preProcess = c("center", "scale"),   # estandarizar X para glmnet
-  family    = "gaussian"               # regresión
+  family     = "gaussian"              # regresión
 )
 
 print(model_en)
@@ -168,7 +174,6 @@ readr::write_csv(best_row_en, "EN_caret_spatialcv5_best_mae.csv")
 # ------------------------
 # 8) Predicciones sobre TEST y archivo para Kaggle
 # ------------------------
-# Importante: solo usamos las columnas x_cols
 pred_price_en <- predict(
   model_en,
   newdata = test_df %>% dplyr::select(all_of(x_cols))

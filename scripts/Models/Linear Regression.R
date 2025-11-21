@@ -21,8 +21,15 @@ tidymodels_prefer()  # evitar conflictos de funciones
 # ------------------------
 # 2) Load data
 # ------------------------
-train <- read.csv("train.csv", na.strings = c("", "NA", "NaN"))
-test  <- read.csv("test.csv",  na.strings = c("", "NA", "NaN"))
+train <- read.csv(
+  "C:/Users/Sergio/Documents/Problem-Set-3-Making-Money-with-ML/data/data_train_text_finished.csv",
+  na.strings = c("", "NA", "NaN")
+)
+
+test  <- read.csv(
+  "C:/Users/Sergio/Documents/Problem-Set-3-Making-Money-with-ML/data/data_test_text_finished.csv",
+  na.strings = c("", "NA", "NaN")
+)
 
 # Chequeos básicos
 stopifnot("property_id" %in% names(train))
@@ -46,16 +53,14 @@ train_sf <- sf::st_as_sf(
   remove = FALSE
 )
 
-# Folds espaciales por bloques (como en las diapositivas)
+# Folds espaciales por bloques
 block_folds <- spatialsample::spatial_block_cv(train_sf, v = 5)
 
 # ------------------------
-# 4) Receta: imputación + dummies (similar a tu pipeline anterior)
+# 4) Receta: imputación + dummies
 # ------------------------
 rec_lm <- recipe(price ~ ., data = train) %>%
   update_role(property_id, new_role = "id") %>% # no usar como predictor
-  # la columna geometry creada por sf no debe ser predictor
-  step_rm(geometry, skip = TRUE) %>%
   # manejar niveles nuevos en test para variables categóricas
   step_novel(all_nominal_predictors()) %>%
   # imputación:
@@ -86,8 +91,8 @@ res_lm <- fit_resamples(
 )
 
 # Ver MAE promedio
-collect_metrics(res_lm)
-lm_mae <- collect_metrics(res_lm) %>% filter(.metric == "mae")
+lm_mae <- collect_metrics(res_lm) %>% 
+  filter(.metric == "mae")
 print(lm_mae)
 readr::write_csv(lm_mae, "LM_tm_spatialcv5_mae.csv")
 
@@ -100,7 +105,7 @@ fit_lm <- fit(wf_lm, data = train)
 prep_rec <- prep(rec_lm, training = train)
 baked_train <- bake(prep_rec, new_data = train)
 vars_used <- setdiff(names(baked_train), "price")
-write_csv(tibble(var = vars_used), "LM_tm_vars_used.csv")
+readr::write_csv(tibble(var = vars_used), "LM_tm_vars_used.csv")
 
 # ------------------------
 # 8) Predicciones sobre TEST y archivo para Kaggle
