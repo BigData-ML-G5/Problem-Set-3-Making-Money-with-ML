@@ -199,7 +199,7 @@ clean_corpus <- function(text_vector) {
     x <- str_replace_all(x, "(m|mt|mts|metro|metros)2([0-9]+)", "\\12 \\2") # This for cases like "138 mts23 habitacion 2 bano"
     x <- str_replace_all(x, "(\\d)(m|mt|mt2|mts|m2|mts2|mtrs)(\\d*)", "\\1 \\2\\3") # This for cases like "25m2" or "23mts2"
     
-    x <- str_replace_all(x, "\\b(m|mt|mt2|mts|mts2|m2)\\b", "metros")
+    x <- str_replace_all(x, "\\b(m|mt|mt2|mts|mts2|m2|mtrs2|mtrs)\\b", "metros")
     x <- str_replace_all(x, "\\b(parqueaderos|garaje|garajes|estacionamiento|carro|carros|vehiculo|vehiculos)\\b", "parqueadero")
     x <- str_replace_all(x, "\\b(bañ|baño|banos|baos|bao)\\b", "bano")
     x <- str_replace_all(x, "\\b(habitaciones|alcobas|alcoba|habitacin|habitacon|habitcion)\\b", "habitacion")
@@ -289,6 +289,15 @@ impute_from_description <- function(df, corpus_desc) {
   found_bath <- str_extract(desc_text, "\\b([0-9]+)\\s*(bano)\\b")
   found_bath_num <- as.numeric(str_extract(found_bath, "[0-9]+"))
   
+  # ---- Regla: si > 8 → tomar primer dígito ----
+  idx_big_bath <- which(!is.na(found_bath_num) & found_bath_num > 8)
+  
+  if (length(idx_big_bath) > 0) {
+    # Extraer el primer dígito de cada caso
+    first_digit <- as.numeric(str_sub(found_bath_num[idx_big_bath], 1, 1))
+    found_bath_num[idx_big_bath] <- first_digit
+  }
+   
   # Count total mentions of "baño"/"bano" variants when no explicit number is found
   bath_count <- str_count(desc_text, "\\b(bano)\\b")
   
@@ -409,31 +418,44 @@ impute_terrace_and_total <- function(df, corpus_desc) {
     cat("Surface not found in:", length(idx_na), "descriptions\n")
   }
   
-  # ---- Regla: si > 999, tomar últimos 3 dígitos ----
-  idx_large2 <- which(!is.na(found_size_num) & found_size_num > 999)
-  if (length(idx_large2) > 0) {
-    found_size_num[idx_large2] <- as.numeric(
-      str_sub(found_size_num[idx_large2], -3, -1)
-    )
+  # ---- Regla 1: si > 999 → tomar últimos 3 dígitos,
+  #      pero si esos < 30 → tomar primeros 3 dígitos ----
+  idx_large <- which(!is.na(found_size_num) & found_size_num > 999)
+  
+  if (length(idx_large) > 0) {
+    
+    # últimos 3 dígitos
+    last3  <- as.numeric(str_sub(found_size_num[idx_large], -3, -1))
+    
+    # primeros 3 dígitos
+    first3 <- as.numeric(str_sub(found_size_num[idx_large], 1, 3))
+    
+    # regla: si últimos 3 < 30 → usar primeros 3
+    fixed3 <- ifelse(last3 < 30, first3, last3)
+    
+    # aplicar corrección
+    found_size_num[idx_large] <- fixed3
   }
   
-  # ---- Regla: si > 400 y desproporcionado → 2/3 ----
-  idx_too_big2 <- which(
+  # ---- Regla 2: si > 400 y desproporcionado → 2/3 ----
+  idx_too_big <- which(
     !is.na(found_size_num) &
       found_size_num > 400 &
       (is.na(rooms_new) | (found_size_num / rooms_new) > 100)
   )
-  if (length(idx_too_big2) > 0) {
-    found_size_num[idx_too_big2] <- round(found_size_num[idx_too_big2] * (2/3))
+  
+  if (length(idx_too_big) > 0) {
+    found_size_num[idx_too_big] <- round(found_size_num[idx_too_big] * (2/3))
   }
   
-  # Imputar superficie cubierta: si NA o menor que lo encontrado
+  # ---- IMPUTACIÓN FINAL: usar solo si mejora la base ----
   idx_update_surface <- which(
     !is.na(found_size_num) &
       (is.na(surface_covered_new) | surface_covered_new < found_size_num)
   )
   
   surface_covered_new[idx_update_surface] <- found_size_num[idx_update_surface]
+
   
   # --------------------------------------------------------------
   # 5. FINAL: actualizar df
@@ -503,7 +525,12 @@ create_extra_features <- function(df, corpus_desc) {
   # If no number but the word exists, assume 1
   has_park_word <- str_detect(desc_text, "\\bparqueadero\\b")
   
-  ifelse(found_park_num > 3, 2, found_park_num)
+  # ---- Regla: si > 8 → tomar primer dígito ----
+  idx_big_park <- which(!is.na(found_park_num) & found_park_num > 3)
+  
+  if (length(idx_big_park) > 0) {
+    found_park_num[idx_big_park] <- 2
+  }
   
   parqueadero_new <- ifelse(!is.na(found_park_num),
                             found_park_num,
@@ -580,7 +607,8 @@ na_report <- tibble(
 
 na_report
 
-# missing <- test_apto %>% filter(is.na(surface_total) | surface_total < 40)
+# missing_test <- test_apto %>% filter(is.na(surface_total) | surface_total < 30)
+# missing_train <- train_apto %>% filter(is.na(surface_total) | surface_total < 30)
 
 # For surface_total, some values are not being considered for special cases, 
 # thus for those in NA or lower than 50 meters we consider another strategy
@@ -711,9 +739,6 @@ test_desc_df  <- as.data.frame(as.matrix(dtm_test_desc))
 train_apto <- cbind(train_apto, train_desc_df)
 test_apto  <- cbind(test_apto,  test_desc_df)
 
-# Eliminate description and title
-train_apto <- train_apto %>% select(-title, -description)
-test_apto <- test_apto %>% select(-title, -description)
 
 # Take ONLY common variables between both test and data
 common_cols <- intersect(names(train_apto), names(test_apto))
@@ -737,7 +762,7 @@ na_report
 # =====================================================================================
 
 # Only houses
-test_casa <- train %>% filter(property_type == "Casa")
+test_casa <- test %>% filter(property_type == "Casa")
 train_casa <- train %>% filter(property_type == "Casa")
 
 # Corpus (still with stopwords) for "Casa" TODO: usar title tal vez no sea necesario
@@ -753,7 +778,60 @@ corpus_test_casa_title <- clean_corpus(test_casa$title)
 # 3.3) Merge new variables with original dataset
 # =====================================================================================
 
+# PASTE _APTO AND _CASA TOGETHER FOR BOTH TRAIN AND TEST
+# columnas existentes en cada dataset (trian)
+cols_apto <- colnames(train_apto)
+cols_casa <- colnames(train_casa)
 
+# columnas faltantes en casa
+cols_to_add <- setdiff(cols_apto, cols_casa)
+
+# agregar columnas faltantes con 0
+for (col in cols_to_add) {
+  train_casa[[col]] <- 0
+}
+
+# Same with test
+cols_apto_test <- colnames(test_apto)
+cols_casa_test <- colnames(test_casa)
+
+cols_to_add_test <- setdiff(cols_apto_test, cols_casa_test)
+
+for (col in cols_to_add_test) {
+  test_casa[[col]] <- 0
+}
+
+# Merge data bases
+train_full_finished <- bind_rows(train_apto, train_casa)
+test_full_finished  <- bind_rows(test_apto, test_casa)
+
+# Eliminate description and title
+train_full_finished <- train_full_finished %>% select(-title, -description)
+test_full_finished <- test_full_finished %>% select(-title, -description)
+
+# Exportar
+write.csv(train_full_finished,
+          file = "data/data_train_text_finished.csv",
+          row.names = FALSE,
+          fileEncoding = "UTF-8")
+
+write.csv(test_full_finished,
+          file = "data/data_test_text_finished.csv",
+          row.names = FALSE,
+          fileEncoding = "UTF-8")
+
+
+
+ # FOR AFTER MERGING WITH GEO-DATA
+
+# Small process to take repeated apartments and missing descriptions
+# To take repeated collumns in train
+df_clean <- df %>% 
+  distinct(lat, lon, description, .keep_all = TRUE)
+
+# Clear those without description
+df <- df %>% 
+  filter(!is.na(description) & str_trim(description) != "")
 
 
 
