@@ -183,25 +183,6 @@ test %>%
 train_apto <- train %>% filter(property_type == "Apartamento")
 test_apto <- test %>% filter(property_type == "Apartamento")
 
-
-#
-#
-#
-#
-# QUITAR ESTA PARTE SINO NO TOMA TODOS LOS VALORES
-#
-#
-#
-#
-train_apto <- train %>% 
-  filter(property_type == "Apartamento") %>% 
-  slice_head(n = 200)
-
-test_apto <- test %>% 
-  filter(property_type == "Apartamento") %>% 
-  slice_head(n = 200)
-
-
 # Function to clean data
 clean_corpus <- function(text_vector) {
   
@@ -216,7 +197,7 @@ clean_corpus <- function(text_vector) {
   replace_synonyms <- content_transformer(function(x) {
     x <- str_replace_all(x, "(\\d)([a-zA-Z])", "\\1 \\2") # This because of missing spaces; "2parqueadero"
     x <- str_replace_all(x, "(m|mt|mts|metro|metros)2([0-9]+)", "\\12 \\2") # This for cases like "138 mts23 habitacion 2 bano"
-    x <- str_replace_all(x, "(\\d)(m|mt|mt2|mts|m2|mts2)(\\d*)", "\\1 \\2\\3") # This for cases like "25m2" or "23mts2"
+    x <- str_replace_all(x, "(\\d)(m|mt|mt2|mts|m2|mts2|mtrs)(\\d*)", "\\1 \\2\\3") # This for cases like "25m2" or "23mts2"
     
     x <- str_replace_all(x, "\\b(m|mt|mt2|mts|mts2|m2)\\b", "metros")
     x <- str_replace_all(x, "\\b(parqueaderos|garaje|garajes|estacionamiento|carro|carros|vehiculo|vehiculos)\\b", "parqueadero")
@@ -264,6 +245,9 @@ clean_corpus <- function(text_vector) {
 
   # Again white spaces (space in numbers tu attempt to fix mistakes on word boundaries)
   corpus <- tm_map(corpus, content_transformer(stripWhitespace))
+  
+ # Aquí parte 4 no está sirviendo del todo ( Está al final final del código)
+  
   
   return(corpus)
 }
@@ -348,101 +332,128 @@ test_apto <- impute_from_description(test_apto, corpus_test_apto_desc)
 
 
 
-# Data imputation function
+# Function specifically for the total surface and terrace sizes
 impute_terrace_and_total <- function(df, corpus_desc) {
   
   # 1. Convert corpus object into normal text
   desc_text <- sapply(corpus_desc, as.character)
   cat("Longitud df:", nrow(df), " - longitud desc_text:", length(desc_text), "\n")
   
-  
-  # 2. Generate local copies of variables before imputation
+  # 2. Local copies
   rooms_new             <- df$rooms
   bed_rooms_new         <- df$bedrooms
   terraza_new           <- df$terraza
-  surface_covered_new   <- df$surface_covered # Al final, si no hay nada en "terraza", se pone en total
+  surface_covered_new   <- df$surface_covered
   
-  # -------------------------------------------------------------------
-  # 3. IMPUTE "TERRAZA"
-  # Look for sentences like "# mts", "# mts2", and so on
-  
+  # --------------------------------------------------------------
+  # 3. IMPUTE TERRAZA
   extract_terraza_metros <- function(text) {
-    pattern <- "\\bterraza\\b(?:\\s+\\w+){0,3}?\\s+([0-9]+)\\s+metros\\b|\\b([0-9]+)\\s+metros\\b(?:\\s+\\w+){0,3}?\\s+\\bterraza\\b"
+    pattern <- "(?:terraza(?:\\s+de)?\\s+([0-9]+)\\s+metros)|(?:([0-9]+)\\s+metros\\s+(?:de\\s+)?terraza)"
     matches <- str_extract_all(text, pattern, simplify = FALSE)[[1]]
     
-    if (length(matches) == 0) return(NA)  # No encontró nada
-    # Tomar la ÚLTIMA coincidencia
-    last_match <- tail(matches, 1)
-    # Extraer número dentro de ese match
-    as.numeric(str_extract(last_match, "[0-9]+"))
+    if (length(matches) == 0) return(NA)
+    
+    # Extraer solo el número correcto
+    nums <- str_extract(matches, "[0-9]+")
+    nums <- as.numeric(nums)
+    
+    # Tomar la ÚLTIMA coincidencia real (la mayoría de anuncios ponen terraza al final)
+    return(tail(nums, 1))
   }
   
-  found_terrace <- extract_terraza_metros(desc_text)
-  found_terrace_num <- as.numeric(str_extract(found_terrace, "[0-9]+"))
+  # Vectorizar correctamente
+  found_terrace <- sapply(desc_text, extract_terraza_metros)
+  found_terrace_num <- as.numeric(found_terrace)
   
-  # Cases to high take first 3 numbers
-  ifelse(found_terrace_num > 999, 
-         found_terrace_num <- as.numeric(str_sub(found_terrace_num, -3, -1)),
-         found_terrace_num <- found_terrace_num)
+  # ---- Regla: si > 999, tomar últimos 3 dígitos ----
+  idx_large <- which(!is.na(found_terrace_num) & found_terrace_num > 999)
+  if (length(idx_large) > 0) {
+    found_terrace_num[idx_large] <- as.numeric(
+      str_sub(found_terrace_num[idx_large], -3, -1)
+    )
+  }
   
-  # If still too high, and room number does not fit, take 2/3 of it
-  ifelse(found_terrace_num > 400 & (is.na(rooms_new) | (found_terrace_num / rooms_new) > 100),
-         found_terrace_num <- round(found_terrace_num*(2/3)),
-         found_terrace_num <- found_terrace_num)
+  # ---- Regla: si aún > 400 y desproporcionado a nº habitaciones → 2/3 ----
+  idx_too_big <- which(
+    !is.na(found_terrace_num) &
+      found_terrace_num > 400 &
+      (is.na(rooms_new) | (found_terrace_num / rooms_new) > 100)
+  )
+  if (length(idx_too_big) > 0) {
+    found_terrace_num[idx_too_big] <- round(found_terrace_num[idx_too_big] * (2/3))
+  }
   
-  terraza_new <- ifelse(is.na(terraza_new) & !is.na(found_terrace_num),
-                        found_terrace_num, terraza_new)
+  # Imputar terraza cuando se encuentre valor válido
+  terraza_new[!is.na(found_terrace_num)] <- found_terrace_num[!is.na(found_terrace_num)]
   
-  # If "terraza" or "balcon" mentioned, impute a minimum; else 0
+  # Imputar mínimo si aparece palabra "terraza" o "balcon"
   has_terraza_word <- str_detect(desc_text, "terraza")
-  has_balcon_word <- str_detect(desc_text, "balcon")
+  has_balcon_word  <- str_detect(desc_text, "balcon")
   
-  terraza_new <- ifelse(is.na(terraza_new) & (has_terraza_word | has_balcon_word), 5, terraza_new)
+  terraza_new[is.na(terraza_new) & (has_terraza_word | has_balcon_word)] <- 5
   
-  terraza_new <- ifelse(is.na(terraza_new), 0, terraza_new)
+  # Los NA restantes → 0
+  terraza_new[is.na(terraza_new)] <- 0
   
-  # -------------------------------------------------------------------
-  # 4. IMPUTE SIZE (m²) (check not "terraza")
-  # Look for sentences like "# mts", "# mts2", and so on
-  found_size <- str_extract(desc_text, "\\b([0-9]+)\\s*metros?(?!\\s*terraza|\\s*de terraza)\\b")
+  # --------------------------------------------------------------
+  # 4. IMPUTE SIZE (superficie cubierta)
+  found_size <- str_extract(
+    desc_text,
+    "\\b([0-9]+)\\s*metros?(?!\\s*terraza|\\s*de terraza)\\b"
+  )
   found_size_num <- as.numeric(str_extract(found_size, "[0-9]+"))
   
-  # DEBUG opcional (sin romper loops ni vectorización)
+  # Debug
   idx_na <- which(is.na(found_size_num))
   if (length(idx_na) > 0) {
     cat("Surface not found in:", length(idx_na), "descriptions\n")
   }
   
-  # Cases to high take first 3 numbers
-  ifelse(found_size_num > 999, 
-         found_size_num <- as.numeric(str_sub(found_size_num, -3, -1)),
-         found_size_num <- found_size_num)
+  # ---- Regla: si > 999, tomar últimos 3 dígitos ----
+  idx_large2 <- which(!is.na(found_size_num) & found_size_num > 999)
+  if (length(idx_large2) > 0) {
+    found_size_num[idx_large2] <- as.numeric(
+      str_sub(found_size_num[idx_large2], -3, -1)
+    )
+  }
   
-  # If still too high, and room number does not fit, take 2/3 of it
-  ifelse(found_size_num > 400 & (is.na(rooms_new) | found_size_num / rooms_new > 100),
-         found_size_num <- round(found_size_num*(2/3)),
-         found_size_num <- found_size_num)
+  # ---- Regla: si > 400 y desproporcionado → 2/3 ----
+  idx_too_big2 <- which(
+    !is.na(found_size_num) &
+      found_size_num > 400 &
+      (is.na(rooms_new) | (found_size_num / rooms_new) > 100)
+  )
+  if (length(idx_too_big2) > 0) {
+    found_size_num[idx_too_big2] <- round(found_size_num[idx_too_big2] * (2/3))
+  }
   
-  surface_covered_new <- ifelse((is.na(surface_covered_new) | surface_covered_new < found_size_num) & !is.na(found_size_num),
-                                found_size_num, surface_covered_new)
+  # Imputar superficie cubierta: si NA o menor que lo encontrado
+  idx_update_surface <- which(
+    !is.na(found_size_num) &
+      (is.na(surface_covered_new) | surface_covered_new < found_size_num)
+  )
   
-  # -------------------------------------------------------------------
-  # 5. Imputated values in the apto dataset
+  surface_covered_new[idx_update_surface] <- found_size_num[idx_update_surface]
   
+  # --------------------------------------------------------------
+  # 5. FINAL: actualizar df
   df <- df %>%
     mutate(
-      terraza          = terraza_new,
-      surface_covered  = surface_covered_new,
+      terraza         = terraza_new,
+      surface_covered = surface_covered_new,
       surface_total = case_when(
         is.na(surface_total) & !is.na(surface_covered_new) & !is.na(terraza_new) ~ surface_covered_new + terraza_new,
         is.na(surface_total) & !is.na(surface_covered_new) &  is.na(terraza_new) ~ surface_covered_new,
         is.na(surface_total) &  is.na(surface_covered_new) & !is.na(terraza_new) & terraza_new > 5 ~ 2 * terraza_new,
+        !is.na(surface_covered) & !is.na(surface_total) & (surface_total < surface_covered) ~ 
+          surface_covered + ifelse(!is.na(terraza) & terraza > 0, terraza, 0),
         TRUE ~ surface_total
       )
     )
   
   return(df)
 }
+
 
 # Impute data
 train_apto <- impute_terrace_and_total(train_apto, corpus_train_apto_desc)
@@ -491,6 +502,8 @@ create_extra_features <- function(df, corpus_desc) {
   
   # If no number but the word exists, assume 1
   has_park_word <- str_detect(desc_text, "\\bparqueadero\\b")
+  
+  ifelse(found_park_num > 3, 2, found_park_num)
   
   parqueadero_new <- ifelse(!is.na(found_park_num),
                             found_park_num,
@@ -571,86 +584,8 @@ na_report
 
 # For surface_total, some values are not being considered for special cases, 
 # thus for those in NA or lower than 50 meters we consider another strategy
+# (see extra)
 
-clean2 <- function
-
-# 4. Search for big numbers in words ("ciento cuarenta y 2")
-# Number dictionary
-num_words <- list(
-  units = c(
-    "cero"=0,"uno"=1,"una"=1,"dos"=2,"tres"=3,"cuatro"=4,"cinco"=5,"seis"=6,
-    "siete"=7,"ocho"=8,"nueve"=9,"diez"=10,"once"=11,"doce"=12,"trece"=13,
-    "catorce"=14,"quince"=15),
-  
-  tens = c(
-    "veinte"=20,"treinta"=30,"cuarenta"=40,"cincuenta"=50,"sesenta"=60,
-    "setenta"=70,"ochenta"=80,"noventa"=90),
-  
-  teens = c(
-    "dieciseis"=16,"diecisiete"=17,"dieciocho"=18,"diecinueve"=19,
-    "veintiuno"=21,"veintidos"=22,"veintitres"=23),
-  
-  hundreds = c(
-    "cien"=100,"ciento"=100,"doscientos"=200,"trescientos"=300,"cuatrocientos"=400,
-    "quinientos"=500,"seiscientos"=600,"setecientos"=700,
-    "ochocientos"=800,"novecientos"=900)
-)
-
-convert_number_phrase <- function(phrase) {
-  words <- str_split(phrase, "\\s+")[[1]]
-  total <- 0
-  current <- 0
-  
-  for (w in words) {
-    
-    if (str_detect(w, "^[0-9]+$")) { 
-      current <- current + as.numeric(w) 
-      next 
-    }
-    
-    if (w %in% names(num_words$hundreds)) {
-      current <- current + num_words$hundreds[[w]]; next }
-    if (w %in% names(num_words$teens)) {
-      current <- current + num_words$teens[[w]]; next }
-    if (w %in% names(num_words$tens)) {
-      current <- current + num_words$tens[[w]]; next }
-    if (w %in% names(num_words$units)) {
-      current <- current + num_words$units[[w]]; next }
-  }
-  total + current
-}
-
-# Only transform phrases with "metros" before
-convert_metros <- content_transformer(function(x){
-  
-  patron <- paste0(
-    "(?<frase>(?:\\w+\\s+){1,4}\\w+)(?=\\s+metros\\b)"
-  )
-  
-  str_replace_all(x, patron, function(m){
-    
-    frase <- str_trim(m)
-    
-    # If its NA, no process
-    if (is.na(frase)) return(frase)
-    
-    # Ignore if its already a number ("234")
-    if (str_detect(frase, "^\\d+$")) return(frase)
-    
-    palabras <- str_split(frase, "\\s+")[[1]]
-    
-    # If word not in dictionary, no changes applied
-    if (!any(palabras %in% unlist(lapply(num_words, names))) &&
-        !any(str_detect(palabras, "^[0-9]+$"))) {
-      return(frase)
-    }
-    
-    num <- convert_number_phrase(frase)
-    return(as.character(num))
-  })
-})
-
-corpus <- tm_map(corpus, convert_metros)
 
 
 
@@ -780,23 +715,21 @@ test_apto  <- cbind(test_apto,  test_desc_df)
 train_apto <- train_apto %>% select(-title, -description)
 test_apto <- test_apto %>% select(-title, -description)
 
+# Take ONLY common variables between both test and data
+common_cols <- intersect(names(train_apto), names(test_apto))
+train_apto <- train_apto[, common_cols]
+test_apto  <- test_apto[, common_cols]
 
-# NA reports
-na_report_train <- tibble(
+
+# See missing % AFTER creation
+na_report <- tibble(
   variable = names(train_apto),
-  train_t = map_dbl(train_apto, ~ round(mean(is.na(.)) * 100, 2)),
+  train_apto = map_dbl(train_apto, ~ round(mean(is.na(.)) * 100, 2)),
+  test_apto  = map_dbl(test_apto,  ~ round(mean(is.na(.)) * 100, 2))
 ) %>%
-  arrange(desc(train_t))
+  arrange(desc(train_apto))
 
-na_report_train
-
-na_report_test <- tibble(
-  variable = names(test_apto),
-  train_t = map_dbl(test_apto, ~ round(mean(is.na(.)) * 100, 2)),
-) %>%
-  arrange(desc(train_t))
-
-na_report_test
+na_report
 
 
 # =====================================================================================
@@ -822,4 +755,93 @@ corpus_test_casa_title <- clean_corpus(test_casa$title)
 
 
 
+
+
+
+
+
+
+
+
+
+# =====================================================================================
+# EXTRA
+# =====================================================================================
+# 4. Search for big numbers in words ("ciento cuarenta y 2")
+# Number dictionary
+num_words <- list(
+  units = c(
+    "cero"=0,"uno"=1,"una"=1,"dos"=2,"tres"=3,"cuatro"=4,"cinco"=5,"seis"=6,
+    "siete"=7,"ocho"=8,"nueve"=9,"diez"=10,"once"=11,"doce"=12,"trece"=13,
+    "catorce"=14,"quince"=15),
+  
+  tens = c(
+    "veinte"=20,"treinta"=30,"cuarenta"=40,"cincuenta"=50,"sesenta"=60,
+    "setenta"=70,"ochenta"=80,"noventa"=90),
+  
+  teens = c(
+    "dieciseis"=16,"diecisiete"=17,"dieciocho"=18,"diecinueve"=19,
+    "veintiuno"=21,"veintidos"=22,"veintitres"=23),
+  
+  hundreds = c(
+    "cien"=100,"ciento"=100,"doscientos"=200,"trescientos"=300,"cuatrocientos"=400,
+    "quinientos"=500,"seiscientos"=600,"setecientos"=700,
+    "ochocientos"=800,"novecientos"=900)
+)
+
+convert_number_phrase <- function(phrase) {
+  words <- str_split(phrase, "\\s+")[[1]]
+  total <- 0
+  current <- 0
+  
+  for (w in words) {
+    
+    if (str_detect(w, "^[0-9]+$")) { 
+      current <- current + as.numeric(w) 
+      next 
+    }
+    
+    if (w %in% names(num_words$hundreds)) {
+      current <- current + num_words$hundreds[[w]]; next }
+    if (w %in% names(num_words$teens)) {
+      current <- current + num_words$teens[[w]]; next }
+    if (w %in% names(num_words$tens)) {
+      current <- current + num_words$tens[[w]]; next }
+    if (w %in% names(num_words$units)) {
+      current <- current + num_words$units[[w]]; next }
+  }
+  total + current
+}
+
+# Only transform phrases with "metros" before
+convert_metros <- content_transformer(function(x){
+  
+  patron <- paste0(
+    "(?<frase>(?:\\w+\\s+){1,4}\\w+)(?=\\s+metros\\b)"
+  )
+  
+  str_replace_all(x, patron, function(m){
+    
+    frase <- str_trim(m)
+    
+    # If its NA, no process
+    if (is.na(frase)) return(frase)
+    
+    # Ignore if its already a number ("234")
+    if (str_detect(frase, "^\\d+$")) return(frase)
+    
+    palabras <- str_split(frase, "\\s+")[[1]]
+    
+    # If word not in dictionary, no changes applied
+    if (!any(palabras %in% unlist(lapply(num_words, names))) &&
+        !any(str_detect(palabras, "^[0-9]+$"))) {
+      return(frase)
+    }
+    
+    num <- convert_number_phrase(frase)
+    return(as.character(num))
+  })
+})
+
+corpus <- tm_map(corpus, convert_metros)" # esto funciona a medias
 
