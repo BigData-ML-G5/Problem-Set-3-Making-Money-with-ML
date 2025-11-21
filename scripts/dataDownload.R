@@ -805,9 +805,9 @@ for (col in cols_to_add_test) {
 train_full_finished <- bind_rows(train_apto, train_casa)
 test_full_finished  <- bind_rows(test_apto, test_casa)
 
-# Eliminate description and title
-train_full_finished <- train_full_finished %>% select(-title, -description)
-test_full_finished <- test_full_finished %>% select(-title, -description)
+# Eliminate title
+train_full_finished <- train_full_finished %>% select(-title)
+test_full_finished <- test_full_finished %>% select(-title)
 
 # Exportar
 write.csv(train_full_finished,
@@ -820,24 +820,251 @@ write.csv(test_full_finished,
           row.names = FALSE,
           fileEncoding = "UTF-8")
 
+# ------------------------------------------------------------------------------
+# Merge data text with data-geo
+geo_train <- read.csv("../T3_geo/train_final_geo.csv")
+geo_test <- read.csv("../T3_geo/test_final_geo.csv")
+
+# Drop original collumns from geo (imputed in data)
+cols_original <- colnames(train)
+cols_original <- cols_original[-1] #dejar property_id para el merge
+cols_original <- cols_original[-14] #terraza no existía antes
+  
+geo_train <- geo_train %>% select(-cols_original, -city, -operation_type)
+geo_test <- geo_test %>% select(-cols_original, -city, -operation_type)
+
+# Merge 
+train_unified <- train_full_finished %>%
+  left_join(geo_train, by = "property_id")
+
+test_unified <- test_full_finished %>%
+  left_join(geo_test, by = "property_id")
+
+# See missing % AFTER unification
+na_report <- tibble(
+  variable = names(train_unified),
+  train_unified = map_dbl(train_unified, ~ round(mean(is.na(.)) * 100, 2)),
+  test_unified  = map_dbl(test_unified,  ~ round(mean(is.na(.)) * 100, 2))
+) %>%
+  arrange(desc(train_unified))
+
+na_report
 
 
- # FOR AFTER MERGING WITH GEO-DATA
+# ------------------------------------------------------------------------------
+# FOR AFTER MERGING WITH GEO-DATA
 
-# Small process to take repeated apartments and missing descriptions
-# To take repeated collumns in train
-df_clean <- df %>% 
-  distinct(lat, lon, description, .keep_all = TRUE)
+# TRAIN: Some small missings imputation
+clean_train_unified <- function(df){
+  
+  # 1. Remove duplicated properties (same coordinates + same description)
+  df <- df %>% distinct(lat, lon, description, .keep_all = TRUE)
+  
+  # 2. Remove listings without description (fixes NA in text-extracted variables)
+  df <- df %>% filter(!is.na(description) & str_trim(description) != "")
+  
+  # 3. Small fix on some missings on "remodelado" and "deposito
+  df <- df %>% mutate(remodelado = ifelse(is.na(remodelado), 0, remodelado))
+  df <- df %>% mutate(deposito = ifelse(is.na(deposito), 0, deposito))
+  
+  # 4. Impute "rooms" with "bedrooms" when missing
+  df <- df %>% mutate(rooms = ifelse(is.na(rooms), bedrooms, rooms))
+  
+  # 5. Handle missing "surface_total" and "surface_covered" after merging apto/casa sets
+  df <- df %>%
+    mutate(
+      # If total is missing but covered exists → use covered
+      surface_total = ifelse(is.na(surface_total) & !is.na(surface_covered),
+                             surface_covered,
+                             surface_total),
+      
+      # If covered is missing, total exists and terraza exists → total − terraza
+      surface_covered = ifelse(is.na(surface_covered) &
+                                 !is.na(surface_total) &
+                                 !is.na(terraza),
+                               surface_total - terraza,
+                               surface_covered),
+      
+      # If covered is missing, total exists and terraza missing → equal to total
+      surface_covered = ifelse(is.na(surface_covered) &
+                                 !is.na(surface_total) &
+                                 is.na(terraza),
+                               surface_total,
+                               surface_covered)
+    )
+  
+  # 6. Impute "bathrooms" using location averages (cluster by neighborhood or lat/lon grid)
+  df <- df %>%
+    group_by(localidad) %>%  
+    mutate(
+      bathrooms = ifelse(
+        is.na(bathrooms),
+        round(mean(bathrooms, na.rm = TRUE)),
+        bathrooms
+      )
+    ) %>% ungroup()
+  
+  # 7. Impute "surface_covered" if suspicious (<30 m2) using location averages
+  df <- df %>%
+    group_by(localidad) %>%
+    mutate(
+      surface_covered = ifelse(
+        surface_covered < 30 | is.na(surface_covered),
+        round(mean(surface_covered, na.rm = TRUE)),
+        surface_covered
+      )
+    ) %>% ungroup()
+  
+  # 8. Impute "terraza" using total - covered when possible
+  df <- df %>%
+    mutate(
+      terraza = ifelse(
+        is.na(terraza) &
+          !is.na(surface_total) &
+          !is.na(surface_covered) &
+          surface_total > surface_covered,
+        surface_total - surface_covered,
+        0
+      )
+    )
+  
+  # 9. Imputate "surface_total" using surface_covered + terraza
+  df <- df %>%
+    mutate(
+      surface_total = ifelse(
+        is.na(surface_total),
+        surface_covered + terraza,
+        surface_total
+      )
+    )
+  
+  # 10. Remove description
+  df <- df %>% select(-description)
+  
+  # 11. Remove
+  df <- df %>% filter(property_type == "Apartamento")
+  
+  return(df)
+}
 
-# Clear those without description
-df <- df %>% 
-  filter(!is.na(description) & str_trim(description) != "")
+# Apply clean (train)
+train_unified <- clean_train_unified(train_unified)
 
 
+# TEST: Some small missings imputation
+clean_test_unified <- function(df){
+  
+  # 1. Small fix on some missings on "remodelado" and "deposito
+  df <- df %>% mutate(remodelado = ifelse(is.na(remodelado), 0, remodelado))
+  df <- df %>% mutate(deposito = ifelse(is.na(deposito), 0, deposito))
+  
+  # 2. Impute "rooms" with "bedrooms" when missing
+  df <- df %>% mutate(rooms = ifelse(is.na(rooms), bedrooms, rooms))
+  
+  # 3. Handle missing "surface_total" and "surface_covered" after merging apto/casa sets
+  df <- df %>%
+    mutate(
+      # If total is missing but covered exists → use covered
+      surface_total = ifelse(is.na(surface_total) & !is.na(surface_covered),
+                             surface_covered,
+                             surface_total),
+      
+      # If covered is missing, total exists and terraza exists → total − terraza
+      surface_covered = ifelse(is.na(surface_covered) &
+                                 !is.na(surface_total) &
+                                 !is.na(terraza),
+                               surface_total - terraza,
+                               surface_covered),
+      
+      # If covered is missing, total exists and terraza missing → equal to total
+      surface_covered = ifelse(is.na(surface_covered) &
+                                 !is.na(surface_total) &
+                                 is.na(terraza),
+                               surface_total,
+                               surface_covered)
+    )
+  
+  # 4. Impute "bathrooms" using location averages (cluster by neighborhood or lat/lon grid)
+  df <- df %>%
+    group_by(localidad) %>%  
+    mutate(
+      bathrooms = ifelse(
+        is.na(bathrooms),
+        round(mean(bathrooms, na.rm = TRUE)),
+        bathrooms
+      )
+    ) %>% ungroup()
+  
+  # 5. Impute "surface_covered" if suspicious (<30 m2) using location averages
+  df <- df %>%
+    group_by(localidad) %>%
+    mutate(
+      surface_covered = ifelse(
+        surface_covered < 30 | is.na(surface_covered),
+        round(mean(surface_covered, na.rm = TRUE)),
+        surface_covered
+      )
+    ) %>% ungroup()
+  
+  # 6. Impute "terraza" using total - covered when possible
+  df <- df %>%
+    mutate(
+      terraza = ifelse(
+        is.na(terraza) &
+          !is.na(surface_total) &
+          !is.na(surface_covered) &
+          surface_total > surface_covered,
+        surface_total - surface_covered,
+        0
+      )
+    )
+  
+  # 7. Imputate "surface_total" using surface_covered + terraza
+  df <- df %>%
+    mutate(
+      surface_total = ifelse(
+        is.na(surface_total),
+        surface_covered + terraza,
+        surface_total
+      )
+    )
+  
+  #8. Remove description
+  df <- df %>% select(-description)
+  
+  return(df)
+}
+
+# Apply clean (test)
+test_unified <- clean_test_unified(test_unified)
 
 
+# See missing % AFTER clena (should all be 0 except test$price)
+na_report <- tibble(
+  variable = names(train_unified),
+  train_unified = map_dbl(train_unified, ~ round(mean(is.na(.)) * 100, 2)),
+  test_unified  = map_dbl(test_unified,  ~ round(mean(is.na(.)) * 100, 2))
+) %>%
+  arrange(desc(train_unified))
+
+na_report
 
 
+# Exportar
+write.csv(train_unified,
+          file = "data/train_unified_final.csv",
+          row.names = FALSE,
+          fileEncoding = "UTF-8")
+
+write.csv(test_unified,
+          file = "data/test_unified_final.csv",
+          row.names = FALSE,
+          fileEncoding = "UTF-8")
+
+
+# Bring data again
+train_unified <- read.csv("data/train_unified_final.csv")
+test_unified <- read.csv("data/test_unified_final.csv")
 
 
 
