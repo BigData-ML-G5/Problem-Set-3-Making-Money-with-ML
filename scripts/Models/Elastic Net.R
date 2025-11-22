@@ -26,10 +26,14 @@ train <- read.csv(
   na.strings = c("", "NA", "NaN")
 )
 
+train <- train %>% select(-property_type)
+
 test  <- read.csv(
   "C:/Users/Sergio/Documents/Problem-Set-3-Making-Money-with-ML/data/data_test_text_finished.csv",
   na.strings = c("", "NA", "NaN")
 )
+
+test <- test %>% select(-property_type)
 
 # Chequeos básicos
 stopifnot("property_id" %in% names(train))
