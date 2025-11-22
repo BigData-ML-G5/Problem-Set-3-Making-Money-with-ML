@@ -3,6 +3,9 @@
 # Random Forest (ranger) + Spatial CV (tidymodels)
 # =======================================================
 
+# ------------------------
+# 1) Cargar librerías
+# ------------------------
 if (!requireNamespace("pacman", quietly = TRUE)) install.packages("pacman")
 suppressPackageStartupMessages({
   pacman::p_load(
@@ -10,11 +13,17 @@ suppressPackageStartupMessages({
     tidymodels,
     sf,
     spatialsample,
-    ranger
+    ranger,
+    doParallel         # <--- para paralelizar tune_grid
   )
 })
 
 tidymodels_prefer()
+
+# nº de núcleos a usar (deja 1 libre)
+n_cores <- parallel::detectCores() - 1
+if (n_cores < 1) n_cores <- 1
+message("Usando ", n_cores, " núcleos")
 
 # ------------------------
 # 2) Cargar datos
@@ -30,56 +39,57 @@ test  <- read.csv(
 )
 
 # ------------------------
-# Quitar property_type (igual que en SL3)
+# 3) Quitar property_type (igual que en SL3 / SL viejo)
 # ------------------------
 if ("property_type" %in% names(train)) {
-  train <- train %>% select(-property_type)
+  train <- train %>% dplyr::select(-property_type)
 }
 if ("property_type" %in% names(test)) {
-  test  <- test  %>% select(-property_type)
+  test  <- test  %>% dplyr::select(-property_type)
 }
 
 # Chequeos básicos
 stopifnot("property_id" %in% names(train))
 stopifnot("property_id" %in% names(test))
 stopifnot("price"       %in% names(train))
-stopifnot(all(c("lon","lat") %in% names(train)))
+stopifnot(all(c("lon", "lat") %in% names(train)))
 
 train$price <- as.numeric(train$price)
 
 # ------------------------
-# 3) Folds espaciales
+# 4) Folds espaciales (spatial_block_cv)
 # ------------------------
 set.seed(2025)
 
 train_sf <- sf::st_as_sf(
   train,
-  coords = c("lon","lat"),
-  crs = 4326,
+  coords = c("lon", "lat"),
+  crs    = 4326,
   remove = FALSE
 )
 
 block_folds <- spatialsample::spatial_block_cv(train_sf, v = 5)
 
 # ------------------------
-# 4) Receta ligera (sin dummies)
+# 5) Receta ligera (sin dummies)
+#    RF maneja bien numéricas + factores
 # ------------------------
 rec_rf <- recipe(price ~ ., data = train) %>%
   update_role(property_id, new_role = "id") %>%
-  step_rm(geometry, skip = TRUE) %>%
   step_novel(all_nominal_predictors()) %>%
   step_impute_median(all_numeric_predictors()) %>%
   step_impute_mode(all_nominal_predictors())
 
 # ------------------------
-# 5) Modelo
+# 6) Especificación del modelo RF
+#    Usando varios hilos dentro de ranger
 # ------------------------
 rf_spec <- rand_forest(
   mtry  = tune(),
   min_n = tune(),
-  trees = 1000
+  trees = 1000          # nº de árboles
 ) %>%
-  set_engine("ranger", importance = "impurity") %>%
+  set_engine("ranger", num.threads = n_cores) %>%  # <--- multi-thread
   set_mode("regression")
 
 wf_rf <- workflow() %>%
@@ -87,72 +97,95 @@ wf_rf <- workflow() %>%
   add_recipe(rec_rf)
 
 # ------------------------
-# 6) Grid de hiperparámetros
+# 7) Grid de hiperparámetros
 # ------------------------
 p <- length(setdiff(names(train), c("price", "property_id")))
 
-mtry_vals  <- unique(pmax(1, c(floor(sqrt(p)), floor(p/3), floor(p/2))))
+mtry_vals  <- unique(pmax(1, c(floor(sqrt(p)), floor(p / 3), floor(p / 2))))
 min_n_vals <- c(5, 20, 50)
 
-rf_grid <- crossing(
+rf_grid <- tidyr::crossing(
   mtry  = mtry_vals,
   min_n = min_n_vals
 )
 
+print(rf_grid)
+
 # ------------------------
-# 7) Spatial CV + tuning
+# 8) Spatial CV + tuning (MAE) en paralelo
 # ------------------------
+
+# Crear cluster para paralelizar por resample
+cl <- parallel::makeCluster(n_cores)
+doParallel::registerDoParallel(cl)
+
+control_rf <- control_grid(
+  parallel_over = "resamples",  # folds en paralelo
+  verbose       = TRUE
+)
+
 set.seed(2025)
 rf_tuned <- tune_grid(
   wf_rf,
   resamples = block_folds,
   grid      = rf_grid,
   metrics   = metric_set(mae),
-  control   = control_grid(save_pred = TRUE)
+  control   = control_rf
 )
 
+
+
 rf_metrics <- collect_metrics(rf_tuned)
+print(rf_metrics)
+
+# Guardar resultados completos de tuning
 readr::write_csv(rf_metrics, "RF_tm_spatialcv5_tuning_mae.csv")
 
+# Mejor combinación según MAE
 rf_best <- rf_metrics %>%
-  filter(.metric == "mae") %>%
-  arrange(mean) %>%
-  slice(1)
+  dplyr::filter(.metric == "mae") %>%
+  dplyr::arrange(mean) %>%
+  dplyr::slice(1)
 
+print(rf_best)
 readr::write_csv(rf_best, "RF_tm_spatialcv5_best_mae.csv")
 
 # ------------------------
-# 8) Entrenar modelo final
+# 9) Entrenar modelo final con hiperparámetros óptimos
 # ------------------------
-best_params <- rf_best %>% select(mtry, min_n)
+best_params <- rf_best %>% dplyr::select(mtry, min_n)
+print(best_params)
 
 wf_rf_final <- finalize_workflow(
   wf_rf,
   best_params
 )
 
+set.seed(2025)
 fit_rf <- fit(wf_rf_final, data = train)
 
-prep_rec <- prep(rec_rf, training = train)
-baked_train <- bake(prep_rec, new_data = train)
-
-vars_used <- setdiff(names(baked_train), "price")
-write_csv(tibble(var = vars_used), "RF_tm_vars_used.csv")
-
 # ------------------------
-# 9) Predicciones para Kaggle
+# 11) Predicciones para Kaggle
 # ------------------------
 pred_test <- predict(fit_rf, new_data = test)$.pred
 pred_test_round <- floor(pred_test / 1e6) * 1e6
 
 submission <- tibble(
   property_id = test$property_id,
-  price       = pred_test_round
+  price       = as.numeric(pred_test_round)
 )
 
-write.csv(submission, "RF_tm_spatialcv5.csv", row.names = FALSE)
-cat("Archivo creado: RF_tm_spatialcv5.csv\n")
+# ------------------------
+# 12) Guardar archivo Kaggle con hiperparámetros en el nombre
+# ------------------------
 
-# ------------------------
-# FIN
-# ------------------------
+mtry_best  <- dplyr::pull(best_params, mtry)
+min_n_best <- dplyr::pull(best_params, min_n)
+
+file_name <- sprintf(
+  "submission_rf_mtry%s_minN%s.csv",
+  mtry_best,
+  min_n_best
+)
+
+readr::write_csv(submission, file_name)
