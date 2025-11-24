@@ -8,26 +8,29 @@ Across the seven required model classes, our best-performing approach is a tuned
 
 -----------------------------------------------------------------------------------------------------------------------------------------------------------------
 ## Repository Structure
-data/
+data/ (Contains all datasets used throughout the project)
 
-Contains all datasets used throughout the project:
+--> raw:  original Properati files and external data sources
 
-raw/ – original Properati files and external data sources
+--> processed: cleaned and merged intermediate datasets
 
-processed/ – cleaned and merged intermediate datasets
+--> spatial: – IDECA layers, shapefiles, and geographic resources used for spatial feature engineering
 
-final/ – modeling-ready dataset with all engineered features
+--> final: modeling-ready dataset with all engineered features
 
-spatial/ – IDECA layers, shapefiles, and geographic resources used for spatial feature engineering
+scripts/(R scripts that execute each stage of the pipeline)
 
-scripts/
+--> download:scripts for retrieving and parsing raw data
 
-R scripts that execute each stage of the pipeline:
+--> cleaning: preprocessing, standardization, deduplication, text-based attribute extraction
 
-download/ – scripts for retrieving and parsing raw data
-
-/ – preprocessing, standardization, deduplication, text-based attribute extraction
-
-/ – construction of spatial distances, amenity-accessibility indices, PCA components
+--> spatial: construction of spatial distances, amenity-accessibility indices, PCA components
 
 models/ – implementations of OLS/Elastic Net, CART, Random Forest, XGBoost, neural networks, and Super Learner
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------
+## Instructions
+
+Run "dataDownload" to replicated data
+
+Each model can run with the already saved final data base, thus you only have to choose your favorite
